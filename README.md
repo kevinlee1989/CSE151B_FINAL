@@ -1,7 +1,7 @@
 # CSE 151B Spring 2026 — Math Reasoning Competition
 
 **Model**: `Qwen/Qwen3-4B-Thinking-2507` (no fine-tuning)  
-**Leaderboard Score**: 0.671 (n=1) → ~0.72 expected (n=3 voting)
+**Leaderboard Score**: **0.671**
 
 ---
 
@@ -10,8 +10,7 @@
 | Item | Details |
 |------|---------|
 | GPU | NVIDIA A100 40GB (UCSD DataHub) |
-| Inference time (n=1) | ~90 minutes (943 questions) |
-| Inference time (n=3) | ~8 hours (943 questions) |
+| Inference time | ~90 minutes (943 questions) |
 | Quantization | INT8 (BitsAndBytes via vLLM) |
 
 ---
@@ -28,13 +27,14 @@ of Qwen3-4B-**Thinking**. Enabling thinking with a controlled budget was the pri
 |---|---|---|
 | Baseline: `thinking=OFF, max=2000` | ~15% | ~40% |
 | `budget=512, max=4000` | ~30% | — |
-| `budget=2048, max=7000, n=1` | 60.0% | **67.1%** |
-| `budget=2048, max=7000, n=3 voting` | 65.0% | *~72% expected* |
+| `budget=256, max=5000` | ~35% | — |
+| **`budget=2048, max=7000`** | **60.0%** | **67.1%** |
 
 ### Final Strategy
 - `enable_thinking=True`, `thinking_budget=2048`, `max_tokens=7000`
-- **n=3 self-consistency majority voting** — generate 3 responses, take the most common answer
-- **Forced `\boxed{` prefix retry** — for responses with no `\boxed{}`, retry with a prefix completion
+- `temperature=0.6`, `top_p=0.95`, `top_k=20`
+- **Forced `\boxed{` prefix retry** for no-boxed responses (batch processed)
+- No fine-tuning — base model only
 
 ---
 
@@ -46,7 +46,7 @@ of Qwen3-4B-**Thinking**. Enabling thinking with a controlled budget was the pri
 pip install vllm transformers bitsandbytes pandas
 ```
 
-### 2. Download dataset
+### 2. Dataset
 
 Place competition data files in the `data/` directory:
 
@@ -58,13 +58,11 @@ data/
 
 ### 3. Model weights
 
-Model weights are downloaded automatically from HuggingFace on first run:
+Downloaded automatically from HuggingFace on first run — no manual download needed:
 
 ```
 Qwen/Qwen3-4B-Thinking-2507
 ```
-
-No manual download required.
 
 ---
 
@@ -91,15 +89,16 @@ Both produce `submission.csv` with columns `id` and `response`.
 
 ### Parameters
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
+| Parameter | Value | Description |
+|-----------|-------|-------------|
 | `data_path` | `data/private.jsonl` | Input dataset path |
 | `output_path` | `submission.csv` | Output CSV path |
 | `model_id` | `Qwen/Qwen3-4B-Thinking-2507` | HuggingFace model ID |
-| `n_samples` | `3` | Samples per question (majority voting) |
 | `thinking_budget` | `2048` | Max thinking tokens |
 | `max_tokens` | `7000` | Max total tokens per response |
-| `temperature` | `0.7` | Sampling temperature |
+| `temperature` | `0.6` | Sampling temperature |
+| `top_p` | `0.95` | Top-p sampling |
+| `top_k` | `20` | Top-k sampling |
 | `gpu_memory_utilization` | `0.55` | Fraction of GPU VRAM to use |
 
 ---
@@ -116,6 +115,6 @@ Both produce `submission.csv` with columns `id` and `response`.
 
 ## Reproducibility Notes
 
-- Results may vary slightly due to sampling randomness
-- Overall accuracy should be consistent with leaderboard (within ~3-5%)
-- For exact reproduction, use `n_samples=3, thinking_budget=2048, temperature=0.7`
+- Results may vary slightly due to sampling randomness (~2-3%)
+- Overall accuracy should be consistent with leaderboard score of 0.671
+- For exact reproduction use `thinking_budget=2048, max_tokens=7000, temperature=0.6`

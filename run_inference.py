@@ -3,31 +3,28 @@ import re
 import csv
 import os
 import pandas as pd
-from collections import Counter
 
 
 def run_inference(
     data_path: str = "data/private.jsonl",
     output_path: str = "submission.csv",
     model_id: str = "Qwen/Qwen3-4B-Thinking-2507",
-    n_samples: int = 3,
     thinking_budget: int = 2048,
     max_tokens: int = 7000,
-    temperature: float = 0.7,
+    temperature: float = 0.6,
     gpu_memory_utilization: float = 0.55,
 ):
     """
     Full inference pipeline for CSE 151B Math Reasoning Competition.
 
-    Strategy: n=3 self-consistency majority voting with thinking_budget=2048.
-    Leaderboard score: 0.671 (n=1) / ~0.72 expected (n=3).
+    Strategy: thinking_budget=2048, max_tokens=7000 with forced \\boxed{ retry.
+    Leaderboard score: 0.671
 
     Args:
         data_path: Path to private.jsonl
         output_path: Output CSV file path
         model_id: HuggingFace model ID
-        n_samples: Number of samples per question for majority voting
-        thinking_budget: Max tokens for thinking phase
+        thinking_budget: Max tokens for the thinking phase
         max_tokens: Max total tokens per response
         temperature: Sampling temperature
         gpu_memory_utilization: Fraction of GPU VRAM to use
@@ -118,34 +115,22 @@ def run_inference(
             thinking_budget=thinking_budget,
         ))
 
-    # ── Generate with majority voting ──
-    print(f"Generating responses (n={n_samples}, budget={thinking_budget}, max={max_tokens})...")
+    # ── Generate ──
+    print(f"Generating responses (budget={thinking_budget}, max={max_tokens}, temp={temperature})...")
     sp = SamplingParams(
-        n=n_samples,
         max_tokens=max_tokens,
         temperature=temperature,
         top_p=0.95,
         top_k=20,
     )
     outputs = llm.generate(prompts, sp)
+    responses = [o.outputs[0].text.strip() for o in outputs]
 
-    final_responses = []
-    for out in outputs:
-        candidates = [o.text.strip() for o in out.outputs]
-        answers    = [extract_boxed(c) for c in candidates]
-        valid      = [(a, c) for a, c in zip(answers, candidates) if a]
-        if not valid:
-            final_responses.append(candidates[0])
-        else:
-            best_ans  = Counter(a for a, _ in valid).most_common(1)[0][0]
-            best_resp = next(c for a, c in valid if a == best_ans)
-            final_responses.append(best_resp)
-
-    no_box = sum(1 for r in final_responses if not extract_boxed(r))
+    no_box = sum(1 for r in responses if not extract_boxed(r))
     print(f"Generation complete. No-boxed: {no_box}/{len(data)}")
 
     # ── Batch retry for no-boxed responses ──
-    retry_indices = [i for i, r in enumerate(final_responses) if not extract_boxed(r)]
+    retry_indices = [i for i, r in enumerate(responses) if not extract_boxed(r)]
     if retry_indices:
         print(f"Retrying {len(retry_indices)} no-boxed responses...")
         retry_prompts = []
@@ -165,16 +150,16 @@ def run_inference(
         retry_out = llm.generate(retry_prompts, retry_sp)
         for j, out in enumerate(retry_out):
             raw = out.outputs[0].text.strip()
-            final_responses[retry_indices[j]] = f"\\boxed{{{raw}}}"
+            responses[retry_indices[j]] = f"\\boxed{{{raw}}}"
 
-    final_no_box = sum(1 for r in final_responses if not extract_boxed(r))
+    final_no_box = sum(1 for r in responses if not extract_boxed(r))
     print(f"After retry — no-boxed: {final_no_box}/{len(data)}")
 
     # ── Save submission CSV ──
     os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
     df = pd.DataFrame([
         {"id": item["id"], "response": resp}
-        for item, resp in zip(data, final_responses)
+        for item, resp in zip(data, responses)
     ])
     df.to_csv(output_path, index=False, quoting=csv.QUOTE_ALL)
     print(f"Saved: {output_path} ({len(df)} rows)")
