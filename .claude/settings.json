@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "additionalDirectories": [
+      "C:\\Users\\jwl09"
+    ],
+    "allow": [
+      "PowerShell(python \"C:\\\\Users\\\\jwl09\\\\transform_notebook.py\")"
+    ]
+  }
+}
