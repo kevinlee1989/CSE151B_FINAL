@@ -4,6 +4,7 @@ import csv
 import os
 import pandas as pd
 
+
 def run_inference(
     data_path: str = "data/private.jsonl",
     output_path: str = "submission.csv",
@@ -16,21 +17,26 @@ def run_inference(
     """
     End-to-End Inference Pipeline for CSE 151B Math Reasoning Competition.
 
-    This function automatically handles model loading, prompt formatting, 
-    batched generation via vLLM with thinking logic enabled, post-processing 
-    retry structures for failed formats, and final CSV formatting.
+    Replicates the exact pipeline that achieved 0.671 on the private leaderboard.
+    Uses Qwen3-4B-Thinking-2507 with thinking_budget=2048, max_tokens=7000.
 
-    Final Leaderboard Score: 0.671
+    Args:
+        data_path: Path to private.jsonl
+        output_path: Output CSV file path
+        model_id: HuggingFace model ID
+        thinking_budget: Max tokens for the thinking phase
+        max_tokens: Max total tokens per response
+        temperature: Sampling temperature
+        gpu_memory_utilization: Fraction of GPU VRAM to use
     """
     from vllm import LLM, SamplingParams
     from transformers import AutoTokenizer
 
-    # ── Load Tokenizer & Model Engine ──
-    print(f"[-] Initializing tokenizer and model from Hub: {model_id}")
+    # ── Load Tokenizer & Model ──
+    print(f"Loading model: {model_id}")
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
 
-    # Instantiate the engine using INT8 BitsAndBytes quantization via vLLM
     llm = LLM(
         model=model_id,
         quantization="bitsandbytes",
@@ -42,39 +48,72 @@ def run_inference(
         max_num_batched_tokens=8192,
         enforce_eager=True,
     )
-    print("[+] Model stack loaded successfully.")
+    print("Model loaded.")
 
-    # ── Dataset Verification & Loading ──
+    # ── Load Dataset ──
     if not os.path.exists(data_path):
-        raise FileNotFoundError(f"Target evaluation file path does not exist: {data_path}")
-        
-    data = [json.loads(line) for line in open(data_path)]
-    print(f"[–] Successfully parsed {len(data)} problems from {data_path}")
+        raise FileNotFoundError(f"Dataset not found: {data_path}")
 
-    # ── Strict Structural Prompt Configurations ──
-    SYSTEM_MATH = (
+    data = [json.loads(line) for line in open(data_path)]
+    print(f"Loaded {len(data)} questions from {data_path}")
+
+    # ── System Prompts (exact prompts used for 0.671 submission) ──
+    SYSTEM_PROMPT_MATH = (
         "You are an expert mathematician. Solve the problem step-by-step. "
         "Put your final answer inside \\boxed{}. "
-        "If the problem has multiple sub-answers, separate them by commas "
-        "inside a single \\boxed{}, e.g. \\boxed{3, 7}. "
-        "IMPORTANT: Write \\boxed{answer} immediately when done. "
-        "Do not write anything after \\boxed{}."
+        "If the problem has multiple sub-answers, separate them by commas inside a single \\boxed{}, "
+        "e.g. \\boxed{3, 7}."
+        """
+    Solve the problem efficiently.
+    Do not over-verify or restart the solution.
+    When you find a plausible answer, immediately finish.
+    You must always end with exactly one final line:
+    \\boxed{answer}
+    If uncertain, still provide your best guess in \\boxed{}.
+    For MCQ, answer only one capital letter inside \\boxed{}.
+    For multiple [ANS] blanks, separate answers with commas in order.
+    Do not write anything after \\boxed{}.
+
+    Do not round or approximate numerical answers.
+    Keep exact fractions or expressions when possible.
+
+    """
     )
-    SYSTEM_MCQ = (
-        "You are an expert mathematician. Select the single best answer. "
-        "Output ONLY the letter inside \\boxed{}, e.g. \\boxed{C}. "
-        "IMPORTANT: Brief reasoning, then immediately \\boxed{letter}. Nothing after."
+
+    SYSTEM_PROMPT_MCQ = (
+        "You are an expert mathematician. "
+        "Read the problem and the answer choices below, then select the single best answer. "
+        "Output ONLY the letter of your chosen option inside \\boxed{}, e.g. \\boxed{C}."
+        """
+    Solve the problem efficiently.
+    Do not over-verify or restart the solution.
+    When you find a plausible answer, immediately finish.
+    You must always end with exactly one final line:
+    \\boxed{answer}
+    If uncertain, still provide your best guess in \\boxed{}.
+    For MCQ, answer only one capital letter inside \\boxed{}.
+    For multiple [ANS] blanks, separate answers with commas in order.
+    Do not write anything after \\boxed{}.
+
+    Do not round or approximate numerical answers.
+    Keep exact fractions or expressions when possible.
+
+    Before your final answer, write no more than 8 lines of reasoning.
+    You must end with \\boxed{answer}.
+
+    """
     )
 
     def build_prompt(question, options):
         if options:
             labels = [chr(65 + i) for i in range(len(options))]
-            opts = "\n".join(f"{l}. {o.strip()}" for l, o in zip(labels, options))
-            return SYSTEM_MCQ, f"{question}\n\nOptions:\n{opts}"
-        return SYSTEM_MATH, question
+            opts_text = "\n".join(f"{lbl}. {opt.strip()}" for lbl, opt in zip(labels, options))
+            return SYSTEM_PROMPT_MCQ, f"{question}\n\nOptions:\n{opts_text}"
+        return SYSTEM_PROMPT_MATH, question
 
+    # ── Answer Extraction ──
     def extract_boxed(text):
-        """Extracts the final valid \\boxed{} sequence after scrubbing inner <think> blocks."""
+        """Extract last \\boxed{} answer, stripping <think> tags first."""
         clean = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
         for t in [clean, text]:
             key = r"\boxed{"
@@ -98,7 +137,7 @@ def run_inference(
                 return answer.strip()
         return ""
 
-    # ── Build Chat-Template Sequences ──
+    # ── Build Prompts ──
     prompts = []
     for item in data:
         system, user = build_prompt(item["question"], item.get("options"))
@@ -107,13 +146,14 @@ def run_inference(
              {"role": "user",   "content": user}],
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=True, # Critical parameter mapped to the 67.1% setup
+            enable_thinking=True,
             thinking_budget=thinking_budget,
         ))
 
-    # ── Primary Pipeline Execution (Pass 1) ──
-    print(f"[-] Executing primary inference pass (budget={thinking_budget}, max_tokens={max_tokens}, temp={temperature})...")
+    # ── Primary Generation Pass ──
+    print(f"Generating (budget={thinking_budget}, max_tokens={max_tokens}, temp={temperature})...")
     sp = SamplingParams(
+        n=1,
         max_tokens=max_tokens,
         temperature=temperature,
         top_p=0.95,
@@ -123,12 +163,12 @@ def run_inference(
     responses = [o.outputs[0].text.strip() for o in outputs]
 
     no_box = sum(1 for r in responses if not extract_boxed(r))
-    print(f"[+] Primary pass complete. Formatting failures (missing \\boxed{{}}): {no_box}/{len(data)}")
+    print(f"Generation complete. No-boxed: {no_box}/{len(data)}")
 
-    # ── Post-Processing Pipeline: Forced \boxed{ Prefix Retry ──
+    # ── Batch Retry for No-Boxed Responses ──
     retry_indices = [i for i, r in enumerate(responses) if not extract_boxed(r)]
     if retry_indices:
-        print(f"[-] Routing {len(retry_indices)} malformed generations to the post-processing retry loop.")
+        print(f"Retrying {len(retry_indices)} no-boxed responses...")
         retry_prompts = []
         for i in retry_indices:
             item = data[i]
@@ -138,7 +178,7 @@ def run_inference(
                  {"role": "user",   "content": user}],
                 tokenize=False,
                 add_generation_prompt=True,
-                enable_thinking=False, # Disable thinking during retry to force immediate structural completion
+                enable_thinking=False,
             )
             retry_prompts.append(base + "\\boxed{")
 
@@ -149,23 +189,23 @@ def run_inference(
             responses[retry_indices[j]] = f"\\boxed{{{raw}}}"
 
     final_no_box = sum(1 for r in responses if not extract_boxed(r))
-    print(f"[+] Post-processing sequence finalized. Structural anomalies remaining: {final_no_box}/{len(data)}")
+    print(f"After retry — no-boxed: {final_no_box}/{len(data)}")
 
-    # ── CSV Serialization ──
+    # ── Save CSV ──
     out_dir = os.path.dirname(output_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
-        
+
     df = pd.DataFrame([
         {"id": item["id"], "response": resp}
         for item, resp in zip(data, responses)
     ])
     df.to_csv(output_path, index=False, quoting=csv.QUOTE_ALL)
-    print(f"[+] Final submission file successfully stored to: {output_path} ({len(df)} rows)")
+    print(f"Saved: {output_path} ({len(df)} rows)")
     return df
 
+
 if __name__ == "__main__":
-    # Standard submission run when executing script directly via CLI
     run_inference(
         data_path="data/private.jsonl",
         output_path="submission.csv",
