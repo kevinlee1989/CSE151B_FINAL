@@ -63,7 +63,7 @@ def run_inference(
         "Put your final answer inside \\boxed{}. "
         "If the problem has multiple sub-answers, separate them by commas inside a single \\boxed{}, "
         "e.g. \\boxed{3, 7}."
-            """
+        """
         Solve the problem efficiently.
         Do not over-verify or restart the solution.
         When you find a plausible answer, immediately finish.
@@ -78,10 +78,6 @@ def run_inference(
         Keep exact fractions or expressions when possible.
         
         """
-        "You are an expert mathematician. Solve the problem step-by-step. "
-        "Put your final answer inside \\boxed{}. "
-        "If the problem has multiple sub-answers, separate them by commas inside a single \\boxed{}, "
-        "e.g. \\boxed{3, 7}."
         "\n\nIMPORTANT: Keep reasoning under 10 lines. "
         "Write \\boxed{answer} immediately when you reach the answer. "
         "Do NOT write anything after \\boxed{}."
@@ -91,7 +87,7 @@ def run_inference(
         "You are an expert mathematician. "
         "Read the problem and the answer choices below, then select the single best answer. "
         "Output ONLY the letter of your chosen option inside \\boxed{}, e.g. \\boxed{C}."
-            """
+        """
         Solve the problem efficiently.
         Do not over-verify or restart the solution.
         When you find a plausible answer, immediately finish.
@@ -109,7 +105,6 @@ def run_inference(
         You must end with \boxed{answer}.
     
         """
-        "You are an expert mathematician. "
         "Select the single best answer. Output ONLY the letter inside \\boxed{}, e.g. \\boxed{C}."
         "\n\nIMPORTANT: 3 lines of reasoning max, then immediately \\boxed{letter}. Nothing after."
     )
