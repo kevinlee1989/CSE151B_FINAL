@@ -4,7 +4,6 @@ import csv
 import os
 import pandas as pd
 
-
 def run_inference(
     data_path: str = "data/private.jsonl",
     output_path: str = "submission.csv",
@@ -15,28 +14,23 @@ def run_inference(
     gpu_memory_utilization: float = 0.55,
 ):
     """
-    Full inference pipeline for CSE 151B Math Reasoning Competition.
+    End-to-End Inference Pipeline for CSE 151B Math Reasoning Competition.
 
-    Strategy: thinking_budget=2048, max_tokens=7000 with forced \\boxed{ retry.
-    Leaderboard score: 0.671
+    This function automatically handles model loading, prompt formatting, 
+    batched generation via vLLM with thinking logic enabled, post-processing 
+    retry structures for failed formats, and final CSV formatting.
 
-    Args:
-        data_path: Path to private.jsonl
-        output_path: Output CSV file path
-        model_id: HuggingFace model ID
-        thinking_budget: Max tokens for the thinking phase
-        max_tokens: Max total tokens per response
-        temperature: Sampling temperature
-        gpu_memory_utilization: Fraction of GPU VRAM to use
+    Final Leaderboard Score: 0.671
     """
     from vllm import LLM, SamplingParams
     from transformers import AutoTokenizer
 
-    # ── Load tokenizer & model ──
-    print(f"Loading model: {model_id}")
+    # ── Load Tokenizer & Model Engine ──
+    print(f"[-] Initializing tokenizer and model from Hub: {model_id}")
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
 
+    # Instantiate the engine using INT8 BitsAndBytes quantization via vLLM
     llm = LLM(
         model=model_id,
         quantization="bitsandbytes",
@@ -48,13 +42,16 @@ def run_inference(
         max_num_batched_tokens=8192,
         enforce_eager=True,
     )
-    print("Model loaded.")
+    print("[+] Model stack loaded successfully.")
 
-    # ── Load dataset ──
+    # ── Dataset Verification & Loading ──
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(f"Target evaluation file path does not exist: {data_path}")
+        
     data = [json.loads(line) for line in open(data_path)]
-    print(f"Loaded {len(data)} questions from {data_path}")
+    print(f"[–] Successfully parsed {len(data)} problems from {data_path}")
 
-    # ── System prompts ──
+    # ── Strict Structural Prompt Configurations ──
     SYSTEM_MATH = (
         "You are an expert mathematician. Solve the problem step-by-step. "
         "Put your final answer inside \\boxed{}. "
@@ -76,9 +73,8 @@ def run_inference(
             return SYSTEM_MCQ, f"{question}\n\nOptions:\n{opts}"
         return SYSTEM_MATH, question
 
-    # ── Answer extraction ──
     def extract_boxed(text):
-        """Extract last \\boxed{} answer, stripping <think> tags first."""
+        """Extracts the final valid \\boxed{} sequence after scrubbing inner <think> blocks."""
         clean = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
         for t in [clean, text]:
             key = r"\boxed{"
@@ -102,7 +98,7 @@ def run_inference(
                 return answer.strip()
         return ""
 
-    # ── Build prompts ──
+    # ── Build Chat-Template Sequences ──
     prompts = []
     for item in data:
         system, user = build_prompt(item["question"], item.get("options"))
@@ -111,12 +107,12 @@ def run_inference(
              {"role": "user",   "content": user}],
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=True,
+            enable_thinking=True, # Critical parameter mapped to the 67.1% setup
             thinking_budget=thinking_budget,
         ))
 
-    # ── Generate ──
-    print(f"Generating responses (budget={thinking_budget}, max={max_tokens}, temp={temperature})...")
+    # ── Primary Pipeline Execution (Pass 1) ──
+    print(f"[-] Executing primary inference pass (budget={thinking_budget}, max_tokens={max_tokens}, temp={temperature})...")
     sp = SamplingParams(
         max_tokens=max_tokens,
         temperature=temperature,
@@ -127,12 +123,12 @@ def run_inference(
     responses = [o.outputs[0].text.strip() for o in outputs]
 
     no_box = sum(1 for r in responses if not extract_boxed(r))
-    print(f"Generation complete. No-boxed: {no_box}/{len(data)}")
+    print(f"[+] Primary pass complete. Formatting failures (missing \\boxed{{}}): {no_box}/{len(data)}")
 
-    # ── Batch retry for no-boxed responses ──
+    # ── Post-Processing Pipeline: Forced \boxed{ Prefix Retry ──
     retry_indices = [i for i, r in enumerate(responses) if not extract_boxed(r)]
     if retry_indices:
-        print(f"Retrying {len(retry_indices)} no-boxed responses...")
+        print(f"[-] Routing {len(retry_indices)} malformed generations to the post-processing retry loop.")
         retry_prompts = []
         for i in retry_indices:
             item = data[i]
@@ -142,7 +138,7 @@ def run_inference(
                  {"role": "user",   "content": user}],
                 tokenize=False,
                 add_generation_prompt=True,
-                enable_thinking=False,
+                enable_thinking=False, # Disable thinking during retry to force immediate structural completion
             )
             retry_prompts.append(base + "\\boxed{")
 
@@ -153,20 +149,23 @@ def run_inference(
             responses[retry_indices[j]] = f"\\boxed{{{raw}}}"
 
     final_no_box = sum(1 for r in responses if not extract_boxed(r))
-    print(f"After retry — no-boxed: {final_no_box}/{len(data)}")
+    print(f"[+] Post-processing sequence finalized. Structural anomalies remaining: {final_no_box}/{len(data)}")
 
-    # ── Save submission CSV ──
-    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
+    # ── CSV Serialization ──
+    out_dir = os.path.dirname(output_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+        
     df = pd.DataFrame([
         {"id": item["id"], "response": resp}
         for item, resp in zip(data, responses)
     ])
     df.to_csv(output_path, index=False, quoting=csv.QUOTE_ALL)
-    print(f"Saved: {output_path} ({len(df)} rows)")
+    print(f"[+] Final submission file successfully stored to: {output_path} ({len(df)} rows)")
     return df
 
-
 if __name__ == "__main__":
+    # Standard submission run when executing script directly via CLI
     run_inference(
         data_path="data/private.jsonl",
         output_path="submission.csv",
